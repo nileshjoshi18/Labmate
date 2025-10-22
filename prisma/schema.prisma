@@ -1,0 +1,46 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          Int      @id @default(autoincrement())
+  email       String   @unique
+  name        String?
+  image       String?
+  password    String?
+  createdAt   DateTime @default(now())
+  files       File[]
+  information Boolean  @default(false)
+  choices     Choices[] // Add this relation
+}
+
+enum SubjectKind {
+  LECTURE
+  LAB
+}
+
+model Choices {
+  id      Int     @id @default(autoincrement()) 
+  subject String
+  kind    SubjectKind  @default(LECTURE)
+  userId  Int     // Add this
+  user    User    @relation(fields: [userId], references: [id])
+}
+
+model File {
+  id          Int      @id @default(autoincrement())
+  name        String
+  size        Int
+  type        String
+  subject     String
+  experiment  String
+  storagePath String
+  uploadedAt  DateTime @default(now())
+  userId      Int
+  user        User     @relation(fields: [userId], references: [id])
+}
