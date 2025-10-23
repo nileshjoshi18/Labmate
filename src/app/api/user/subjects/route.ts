@@ -1,14 +1,16 @@
 // app/api/user/subjects/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
+import type { Session } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 
-export const revalidate = 0; // avoid caching
+export const runtime = "nodejs"; // Prisma-safe
+export const revalidate = 0;
 
 export async function GET(_req: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
+    const session = (await getServerSession(authOptions)) as Session | null;
     if (!session?.user?.email) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -20,9 +22,10 @@ export async function GET(_req: NextRequest) {
 
     const subjects = user?.choices?.map((c) => c.subject) ?? [];
     const choices =
-      user?.choices?.map((c: any) => ({
+      user?.choices?.map((c) => ({
         subject: c.subject,
-        kind: c.kind ?? "LECTURE",
+        // Prisma enums are strings at runtime; default to "LECTURE"
+        kind: (c as { kind?: "LECTURE" | "LAB" }).kind ?? "LECTURE",
       })) ?? [];
 
     return NextResponse.json({
@@ -38,7 +41,7 @@ export async function GET(_req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
+    const session = (await getServerSession(authOptions)) as Session | null;
     if (!session?.user?.email) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -83,8 +86,7 @@ export async function POST(req: NextRequest) {
       prisma.choices.createMany({
         data: clean.map((c) => ({
           subject: c.subject,
-          // If your schema doesn't have `kind`, remove the next line
-          kind: c.kind, // enum SubjectKind in Prisma
+          kind: c.kind, // enum in Prisma schema
           userId: user.id,
         })),
       }),
@@ -95,10 +97,10 @@ export async function POST(req: NextRequest) {
     ]);
 
     return NextResponse.json({ ok: true }, { status: 201 });
-  } catch (err: any) {
+  } catch (err) {
     console.error("POST /api/user/subjects error:", err);
     return NextResponse.json(
-      { error: "Server error", detail: err?.message },
+      { error: "Server error" },
       { status: 500 }
     );
   }

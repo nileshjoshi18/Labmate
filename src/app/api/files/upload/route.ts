@@ -1,94 +1,81 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
+import type { Session } from "next-auth";
 import { createClient } from "@supabase/supabase-js";
-import { PrismaClient } from "@prisma/client";
-import { authOptions } from "@/app/api/auth/[...nextauth]/route";
+import { authOptions } from "@/lib/auth";
+import prisma from "@/lib/prisma";
 
-// Initialize Supabase client (Service Role key = server-side only)
+export const runtime = "nodejs";
+
 const supabase = createClient(
-process.env.NEXT_PUBLIC_SUPABASE_URL!,
-process.env.SUPABASE_SERVICE_ROLE_KEY!
+  process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
+  process.env.SUPABASE_SERVICE_ROLE_KEY ?? ""
 );
 
-const prisma = new PrismaClient();
-
 export async function POST(req: Request) {
-try {
-// 🔒 Verify user session
-const session = await getServerSession(authOptions);
-if (!session?.user?.email) {
-return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-}
+  try {
+    const session = (await getServerSession(authOptions)) as Session | null;
+    if (!session?.user?.email) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-// 📦 Parse uploaded data
-const formData = await req.formData();
-const file = formData.get("file") as File;
-const subject = formData.get("subject") as string;
-const experiment = formData.get("experiment") as string;
+    const formData = await req.formData();
+    const file = formData.get("file");
+    const subject = String(formData.get("subject") ?? "");
+    const experiment = String(formData.get("experiment") ?? "");
+    if (!(file instanceof Blob) || !subject || !experiment) {
+      return NextResponse.json(
+        { error: "Missing file, subject, or experiment" },
+        { status: 400 }
+      );
+    }
 
-if (!file || !subject || !experiment) {
-  return NextResponse.json(
-    { error: "Missing file, subject, or experiment" },
-    { status: 400 }
-  );
-}
+    // size check (50MB)
+    if ((file as File).size > 50 * 1024 * 1024) {
+      return NextResponse.json({ error: "File too large" }, { status: 400 });
+    }
 
-// ⚠️ Validate file size (limit: 50MB)
-const maxSize = 50 * 1024 * 1024;
-if (file.size > maxSize) {
-  return NextResponse.json(
-    { error: "File too large. Maximum size is 50MB" },
-    { status: 400 }
-  );
-}
+    const user = await prisma.user.findUnique({
+      where: { email: session.user.email },
+      select: { id: true },
+    });
+    if (!user) {
+      return NextResponse.json({ error: "User not found" }, { status: 404 });
+    }
 
-// 👤 Get user from Prisma DB
-const user = await prisma.user.findUnique({
-  where: { email: session.user.email },
-});
+    const safeSubject = subject.replace(/[^\w\s-]/g, "").trim() || "subject";
+    const safeExperiment =
+      experiment.replace(/[^\w\s-]/g, "").trim() || "experiment";
+    const fileName = `${user.id}/${safeSubject}/${safeExperiment}/${Date.now()}_${(file as File).name}`;
 
-if (!user) {
-  return NextResponse.json({ error: "User not found" }, { status: 404 });
-}
+    const arrayBuffer = await (file as File).arrayBuffer();
+    const { error } = await supabase.storage
+      .from("student-files")
+      .upload(fileName, arrayBuffer, {
+        contentType: (file as File).type || "application/octet-stream",
+        upsert: false,
+      });
 
-// 🗂️ Create unique file path
-const fileName = `${user.id}/${subject}/${experiment}/${Date.now()}_${file.name}`;
+    if (error) {
+      console.error("Supabase upload error:", error);
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
 
-// Convert File → Buffer
-const arrayBuffer = await file.arrayBuffer();
-const buffer = Buffer.from(arrayBuffer);
+    const record = await prisma.file.create({
+      data: {
+        name: (file as File).name,
+        size: (file as File).size,
+        type: (file as File).type,
+        subject,
+        experiment,
+        storagePath: fileName,
+        userId: user.id,
+      },
+    });
 
-// ☁️ Upload to Supabase Storage bucket
-const { data, error } = await supabase.storage
-  .from("student-files") // ✅ your bucket name
-  .upload(fileName, buffer, {
-    contentType: file.type,
-    upsert: false,
-  });
-
-if (error) {
-  console.error("Supabase upload error:", error);
-  return NextResponse.json({ error: error.message }, { status: 500 });
-}
-
-// 🧾 Save metadata in PostgreSQL via Prisma
-const fileRecord = await prisma.file.create({
-  data: {
-    name: file.name,
-    size: file.size,
-    type: file.type,
-    subject: subject,
-    experiment: experiment,
-    storagePath: fileName,
-    userId: user.id,
-  },
-});
-
-return NextResponse.json({ success: true, file: fileRecord }, { status: 201 });
-
-
-} catch (error) {
-console.error("Upload error:", error);
-return NextResponse.json({ error: "Upload failed" }, { status: 500 });
-}
+    return NextResponse.json({ success: true, file: record }, { status: 201 });
+  } catch (err) {
+    console.error("Upload error:", err);
+    return NextResponse.json({ error: "Upload failed" }, { status: 500 });
+  }
 }
